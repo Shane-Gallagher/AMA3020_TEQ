@@ -1,0 +1,134 @@
+---
+title: "AMA3020"
+author: "Shane Gallagher"
+date: "2025-02-25"
+output: html_document
+---
+
+```{r}
+##Load required libraries
+library(tidyverse)
+library(broom)
+library(scales)
+library(ggdag)
+library(dagitty)
+library(truncnorm)
+library(ipw)
+library(WeightIt)
+library(tibble)
+library(ggplot2)
+library(moments)
+```
+
+
+```{r}
+set.seed(1234)
+##Simulate Data
+n_students <- 150
+
+attend_data <- tibble(
+  id = 1:n_students,
+  grades = rnorm(n_students, mean = 50, sd = 20)
+) %>%
+  ##generate prior attendance with a beta distribution plus an effect from grades
+  mutate(
+    past_attend_base = rbeta(n_students, shape1 = 7, shape2 = 4) * 100,
+    past_attend_effect = grades * 0.05,
+    past_attend = past_attend_base + past_attend_effect + rnorm(n_students, mean = 0, sd = 3),
+    past_attend = rescale(past_attend, to = c(0, 100))
+  ) %>%
+  ##Estimate the probability of attendance and TEQ_attend
+  mutate(
+    prob_attend = plogis(-4 + 0.04 * grades + 0.06 * past_attend),
+    TEQ_attend = rbinom(n_students, size = 1, prob = prob_attend),
+    ##Simulated outcome that is also a function of covariates
+    treatment = 0.5 + 0.7 * grades + 0.8 * past_attend + rnorm(n_students, mean = 0, sd = 2)
+  ) %>%
+  select(-c(past_attend_base, past_attend_effect))
+```
+
+
+```{r}
+##model selection process
+selection_model <- glm(TEQ_attend ~ grades + past_attend, data = attend_data, family = binomial)
+
+##Add propensity score
+attend_data <- attend_data %>%
+  mutate(pred_prob = predict(selection_model, type = "response"))
+
+##Compute the marginal probability of attendance (for stabilization)
+p_t <- mean(attend_data$TEQ_attend)
+
+biased_data <- attend_data %>% filter(TEQ_attend == 1)
+
+##Compute stabilized weights for the biased sample
+biased_data <- biased_data %>%
+  mutate(ipw = p_t / pred_prob)
+```
+
+
+```{r}
+##model using ipq to deduce true attendance
+true_attendance_model <- lm(prob_attend ~ grades + past_attend, data = biased_data, weights = ipw)
+
+attend_data <- attend_data %>%
+  mutate(pred_true_attend = pmax(0, pmin(1, predict(true_attendance_model, newdata = attend_data))))
+
+```
+
+
+```{r}
+##plots
+plot_data_full <- attend_data %>%
+  select(pred_true_attend) %>%
+  mutate(Type = "IPW Predicted True Attendance") %>%
+  rename(Attendance_Prob = pred_true_attend)
+
+plot_data_biased <- biased_data %>%
+  select(prob_attend) %>%
+  mutate(Type = "Observed (Biased) Attendance") %>%
+  rename(Attendance_Prob = prob_attend)
+
+plot_data <- bind_rows(plot_data_full, plot_data_biased)
+
+##Plot the density distributions
+density_plot<-ggplot(plot_data, aes(x = Attendance_Prob, fill = Type, color = Type)) +
+  geom_density(alpha = 0.3) +
+  labs(
+    x = "Attendance Probability",
+    y = "Density"
+  ) +
+  scale_fill_manual(values = c("IPW Predicted True Attendance" = "blue", "Observed (Biased) Attendance" = "red")) +
+  scale_color_manual(values = c("IPW Predicted True Attendance" = "blue", "Observed (Biased) Attendance" = "red")) +
+  theme_minimal()
+
+density_plot
+
+```
+
+```{r}
+##Compute summary statistics
+summary_stats <- attend_data %>%
+  summarise(
+    Mean_Predicted_Attendance = mean(pred_true_attend),
+    SD_Predicted_Attendance = sd(pred_true_attend),
+    Min_Predicted_Attendance = min(pred_true_attend),
+    Max_Predicted_Attendance = max(pred_true_attend),
+    Skewness_Predicted = skewness(pred_true_attend),
+    Kurtosis_Predicted = kurtosis(pred_true_attend)
+  )
+
+summary_stats_biased <- biased_data %>%
+  summarise(
+    Mean_Biased_Attendance = mean(prob_attend),
+    SD_Biased_Attendance = sd(prob_attend),
+    Min_Biased_Attendance = min(prob_attend),
+    Max_Biased_Attendance = max(prob_attend),
+    Skewness_Biased = skewness(prob_attend),
+    Kurtosis_Biased = kurtosis(prob_attend)
+  )
+
+##Print results
+print(summary_stats)
+print(summary_stats_biased)
+```
